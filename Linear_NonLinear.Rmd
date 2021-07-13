@@ -1,0 +1,207 @@
+---
+title: "Logistic regression modeling"
+author: "Nina Li"
+date: "May 14, 2019"
+output: html_document
+---
+Source: [Quantiatie Geography](https://rspatial.org/raster/analysis/6-local_regression.html) 
+
+<font size="4">Apply logistic regression to predict temperature</font>
+```{r warning=FALSE, cache=TRUE, collapse=TRUE}
+# load packages
+library(raster)
+library(rgdal)
+library(dismo)
+library(mgcv)
+library(fields)
+library(glmnet)
+```
+
+
+```{r}
+# load California boundary
+datapath <- ("D:/Ninalty/Ninalty_CV/ENG_Datascience/Week7/")
+CA <- shapefile(file.path(datapath, "counties_2000.shp"))
+
+d <- read.csv(file.path(datapath, "temperature.csv"))
+d$temp <- rowMeans(d[, c(6:17)])
+plot(sort(d$temp), ylab=expression('Annual average temperature ( '~degree~'C )'),
+las=1, xlab='Stations')
+```
+
+Make a simple map of temperature
+```{r}
+dsp <- SpatialPoints(d[,3:4], proj4string=CRS("+proj=longlat +datum=NAD83"))
+
+dsp <- SpatialPointsDataFrame(dsp, d)
+cuts <- c(8,11,14,18,21,25)
+pols <- list("sp.polygons", CA, fill = "lightblue")
+print(spplot(dsp, 'temp', cuts=cuts, sp.layout=pols,
+col.regions=rev(heat.colors(5))))
+```
+
+Transformation
+```{r}
+# assign coordinates information
+TA <- CRS(" +proj=aea +lat_1=34 +lat_2=40.5 +lat_0=0 +lon_0=-120 +x_0=0
++y_0=-4000000 +datum=NAD83 +units=m +no_defs +ellps=GRS80 +towgs84=0,0,0")
+
+# convert the coordinate system
+dta <- spTransform(dsp, TA)
+cata <- spTransform(CA, TA)
+```
+
+Sampling for cross-validation
+```{r}
+# set test and train datasets
+set.seed(5162016)
+k <- kfold(dta)
+
+# take a look at the dataset
+test <- dta[k==1, ]
+train <- dta[k!=1, ]
+
+plot(cata, col='light gray')
+points(train, pch=20, col='blue')
+points(test, pch=15, col='red')
+legend('topright', c('model training', 'model testing'), pch=c(20, 15), col=c('blue', 'red'))
+```
+
+<font size="4">Fit the linear model</font>
+```{r}
+# format the data
+df <- data.frame(coordinates(train), temp=train$temp)
+colnames(df)[1:2] = c('x', 'y')
+
+head(df)
+```
+
+Fit a linear model to the data\
+The summary shows that x has no significant relationship with temperature. x is logitude here.\
+Temperature has negative relationship with y, which is the latitude here.
+```{r}
+m <- glm(temp ~ x+y, data=df)
+summary(m)
+```
+
+Question 3: According to this model. How much does the temperature in California change if you travel 500 miles to the north (show the R code to compute that)
+
+To estimate the variation of temperature when travel 500 miles to the north, all the latitude was added with 500 miles. Prediction was made based on new latitude values. On average, moving 500 miles north decreased temperature by 0.01 celcium degree.
+```{r}
+#create a new dataframe for the comparison
+df2 <- df 
+
+#add 500miles to the y value
+df2$y <- df2$y+1609.34 #convert the miles to meter
+
+#predict the temperature with y+500 miles
+p2 <- predict(m, df2)
+
+#get the difference in temperature 
+dif <- p2-df2$temp
+df2$dif <- dif
+
+mean(df2$dif)
+```
+
+Question 4: Was it important to do 5-fold cross-validation, instead of a single 20-80 split?
+NO, based on the RMSE, both of the two methods have similar performance.
+```{r}
+v <- data.frame(coordinates(test))
+colnames(v)[1:2] = c('x', 'y')
+p <- predict(m, v)
+head(p)
+```
+
+```{r}
+# now the linear model
+RMSE <- function(observed, predicted) {
+sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+}
+RMSE(p, test$temp)
+```
+
+Predictions
+```{r}
+# prepare data
+r <- raster(round(extent(cata)), res=10000, crs=TA)
+# get the x coordinates
+x <- init(r, v='x')
+# set areas outside of CA to NA
+x <- mask(x, cata)
+# get the y coordinates
+y <- init(r, v='y')
+# combine the two variables (RasterLayers)
+s <- stack(x,y)
+names(s) <- c('x', 'y')
+```
+
+Now make a model with all data
+```{r}
+df <- data.frame(coordinates(dta), temp=dta$temp)
+colnames(df)[1:2] = c('x', 'y')
+
+m <- glm(temp ~ ., data=df)
+
+# predict
+trend <- predict(s, m)
+plot(trend)
+contour(trend, add=TRUE)
+```
+
+Try second order polynomials and interactions betwen x and y.
+
+Question 5: What is the best model sofar? Why?
+The Second-order polynomials and interactions becuase it has the lowest RMSE and AIC.
+```{r collapse=TRUE}
+m <- glm(temp ~ poly(x, 2, raw=TRUE) * poly(y, 2, raw=TRUE), data=df)
+summary(m)
+
+z <- interpolate(r, m)
+mask <- mask(z, cata)
+zm <- mask(z, mask)
+plot(zm)
+contour(zm, add=TRUE)
+```
+
+<font size="4">Linear Model Selection and Regularization</font>
+
+Question 6: Rerun the last model using (a) ridge regression, and (b) lasso regression. Show the changes in coefficients for three values of lambda; by finishing the code below
+
+Ridge regression has much higher variation in lambda than lasso regression
+```{r}
+f <- temp ~ poly(x, 2, raw=TRUE) * poly(y, 2, raw=TRUE)
+x <- model.matrix(f, df)
+library(glmnet)
+#ridge regression
+g_rid <- glmnet(x, df$temp, alpha = 0)
+c(g_rid$lambda[10], g_rid$lambda[50], g_rid$lambda[90])
+```
+```{r}
+plot(g_rid$lambda, main="lambda ~ ridge regression")
+```
+
+
+```{r}
+#lasso regression
+g_lasso <- glmnet(x, df$temp, alpha = 1)
+c(g_lasso$lambda[1], g_lasso$lambda[50], g_lasso$lambda[90])
+```
+
+```{r}
+plot(g_lasso$lambda, main="lambda ~ lasso regression")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
